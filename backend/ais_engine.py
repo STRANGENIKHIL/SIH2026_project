@@ -58,3 +58,41 @@ class AISEngine:
                 }
             ]
         }
+
+    def clean_ais_data(self, raw_pings):
+        """Cleans and validates raw AIS pings filtering spatial, speed & heading outliers."""
+        cleaned = []
+        rejected_count = 0
+        seen_timestamps = set()
+
+        for ping in raw_pings:
+            time_str = ping.get("time")
+            lat = ping.get("lat")
+            lon = ping.get("lon")
+            sog = ping.get("sog_knots")
+            cog = ping.get("cog_deg")
+
+            if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+                rejected_count += 1
+                continue
+            if not (0.0 <= sog <= 45.0):
+                rejected_count += 1
+                continue
+            if not (0.0 <= cog <= 360.0):
+                rejected_count += 1
+                continue
+            if time_str in seen_timestamps:
+                rejected_count += 1
+                continue
+
+            seen_timestamps.add(time_str)
+            cleaned.append(ping)
+
+        cleaned.sort(key=lambda x: x["time"])
+        return {
+            "cleaned_pings": cleaned,
+            "raw_ping_count": len(raw_pings),
+            "cleaned_ping_count": len(cleaned),
+            "rejected_ping_count": rejected_count,
+            "cleaning_status": "PASSED_QUALITY_AUDIT" if rejected_count < len(raw_pings) else "ALL_REJECTED"
+        }
