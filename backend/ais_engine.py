@@ -96,3 +96,64 @@ class AISEngine:
             "rejected_ping_count": rejected_count,
             "cleaning_status": "PASSED_QUALITY_AUDIT" if rejected_count < len(raw_pings) else "ALL_REJECTED"
         }
+
+    def _parse_iso_time(self, time_str):
+        clean_str = time_str.replace("Z", "+00:00")
+        return datetime.fromisoformat(clean_str)
+
+    def _haversine_distance_km(self, lat1, lon1, lat2, lon2):
+        R = 6371.0
+        dlat = math.radians(lat2 - lat1)
+        dlon = math.radians(lon2 - lon1)
+        a = (math.sin(dlat / 2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2)**2)
+        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+        return R * c
+
+    def reconstruct_trajectory(self, pings, origin_time_str):
+        """Reconstructs track geometry, loitering, dark gaps & temporal interpolation at t0."""
+        if not pings:
+            return None
+        origin_dt = self._parse_iso_time(origin_time_str)
+        dark_gaps, speed_changes, course_changes, loitering_periods = [], [], [], []
+        interpolated_at_t0 = None
+
+        for i in range(len(pings)):
+            curr = pings[i]
+            curr_dt = self._parse_iso_time(curr["time"])
+            if curr["sog_knots"] < 3.0:
+                loitering_periods.append(curr)
+
+            if i > 0:
+                prev = pings[i - 1]
+                prev_dt = self._parse_iso_time(prev["time"])
+                gap_mins = (curr_dt - prev_dt).total_seconds() / 60.0
+                if gap_mins > 45.0:
+                    dark_gaps.append({
+                        "start_time": prev["time"], "end_time": curr["time"],
+                        "duration_mins": round(gap_mins, 1),
+                        "start_coords": [prev["lon"], prev["lat"]],
+                        "end_coords": [curr["lon"], curr["lat"]]
+                    })
+                sog_drop = prev["sog_knots"] - curr["sog_knots"]
+                if sog_drop > 3.0:
+                    speed_changes.append({"from_sog": prev["sog_knots"], "to_sog": curr["sog_knots"], "drop_knots": round(sog_drop, 1), "timestamp": curr["time"]})
+                cog_diff = abs(curr["cog_deg"] - prev["cog_deg"])
+                if cog_diff > 180: cog_diff = 360 - cog_diff
+                if cog_diff > 25.0:
+                    course_changes.append({"from_cog": prev["cog_deg"], "to_cog": curr["cog_deg"], "delta_deg": round(cog_diff, 1), "timestamp": curr["time"]})
+
+                if prev_dt <= origin_dt <= curr_dt:
+                    total_sec = (curr_dt - prev_dt).total_seconds()
+                    if total_sec > 0:
+                        ratio = (origin_dt - prev_dt).total_seconds() / total_sec
+                        interp_lat = prev["lat"] + ratio * (curr["lat"] - prev["lat"])
+                        interp_lon = prev["lon"] + ratio * (curr["lon"] - prev["lon"])
+                        interp_sog = prev["sog_knots"] + ratio * (curr["sog_knots"] - prev["sog_knots"])
+                        interp_cog = prev["cog_deg"] + ratio * (curr["cog_deg"] - prev["cog_deg"])
+                        interpolated_at_t0 = {"time": origin_time_str, "lat": round(interp_lat, 5), "lon": round(interp_lon, 5), "sog_knots": round(interp_sog, 1), "cog_deg": round(interp_cog, 1), "is_interpolated": True}
+
+        if not interpolated_at_t0:
+            closest_ping = min(pings, key=lambda p: abs((self._parse_iso_time(p["time"]) - origin_dt).total_seconds()))
+            interpolated_at_t0 = {"time": closest_ping["time"], "lat": closest_ping["lat"], "lon": closest_ping["lon"], "sog_knots": closest_ping["sog_knots"], "cog_deg": closest_ping["cog_deg"], "is_interpolated": False}
+
+        return {"dark_gaps": dark_gaps, "speed_changes": speed_changes, "course_changes": course_changes, "loitering_periods": loitering_periods, "interpolated_at_t0": interpolated_at_t0}
